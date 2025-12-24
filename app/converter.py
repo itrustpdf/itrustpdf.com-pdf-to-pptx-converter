@@ -8,11 +8,14 @@ import logging
 import io
 import tempfile
 import os
+import subprocess
+import sys
 
 from pptx import Presentation
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from PIL import Image
+import atexit
 
 from .models import TextBlock, MINIMUM_TEXT_THRESHOLD
 from .utils import get_pdf_dimensions
@@ -98,7 +101,7 @@ def pdf_to_pptx(pdf_bytes: bytes,
 
 def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
     """
-    Convert PPTX bytes to PDF bytes by rendering each slide as an image.
+    Convert PPTX bytes to PDF bytes by converting each slide to an image.
     
     Args:
         pptx_bytes: PPTX file content as bytes
@@ -113,48 +116,45 @@ def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
     try:
         logger.info("Starting PPTX to PDF conversion")
         
-        # Create temporary files
-        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_pptx:
-            tmp_pptx.write(pptx_bytes)
-            tmp_pptx_path = tmp_pptx.name
-        
-        temp_image_files = []
+        # Create temporary directory for all files
+        temp_dir = tempfile.mkdtemp()
+        temp_files_to_clean = []
         
         try:
-            # Load the presentation
-            presentation = Presentation(tmp_pptx_path)
-            slide_count = len(presentation.slides)
+            # Save PPTX to temporary file
+            pptx_path = os.path.join(temp_dir, "input.pptx")
+            with open(pptx_path, 'wb') as f:
+                f.write(pptx_bytes)
+            temp_files_to_clean.append(pptx_path)
             
-            logger.info(f"Processing PPTX: {slide_count} slides")
+            # Convert PPTX to images using different methods
+            image_paths = _convert_pptx_to_images(pptx_path, temp_dir)
             
-            if slide_count == 0:
-                raise ValueError("Empty PPTX file")
+            if not image_paths:
+                raise ValueError("Failed to convert any slides to images")
             
-            # Get slide dimensions (in inches)
-            slide_width = presentation.slide_width.inches
-            slide_height = presentation.slide_height.inches
+            # Get slide dimensions from the first image
+            first_image = Image.open(image_paths[0])
+            image_width, image_height = first_image.size
             
-            # Convert inches to points (1 inch = 72 points)
-            pdf_width = slide_width * 72
-            pdf_height = slide_height * 72
+            # Convert image pixels to PDF points (72 DPI standard)
+            # Assuming images are saved at 96 DPI, adjust if needed
+            dpi_ratio = 72 / 96  # Convert from 96 DPI to 72 DPI (standard PDF)
+            pdf_width = image_width * dpi_ratio
+            pdf_height = image_height * dpi_ratio
             
-            # Create a PDF in memory
+            # Create PDF from images
             pdf_buffer = io.BytesIO()
             c = canvas.Canvas(pdf_buffer, pagesize=(pdf_width, pdf_height))
             
-            # Convert each slide to an image and add to PDF
-            for slide_idx, slide in enumerate(presentation.slides):
-                logger.info(f"Processing slide {slide_idx + 1}/{slide_count}")
-                
-                # Save slide as image
-                image_path = _save_slide_as_image(presentation, slide_idx)
-                temp_image_files.append(image_path)
+            for i, image_path in enumerate(image_paths):
+                logger.info(f"Adding slide {i + 1}/{len(image_paths)} to PDF")
                 
                 # Add image to PDF page
                 c.drawImage(image_path, 0, 0, pdf_width, pdf_height)
                 
                 # Add new page for next slide (except last one)
-                if slide_idx < slide_count - 1:
+                if i < len(image_paths) - 1:
                     c.showPage()
             
             # Save PDF
@@ -165,88 +165,238 @@ def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
             return pdf_bytes
             
         finally:
-            # Clean up temporary files
-            try:
-                os.unlink(tmp_pptx_path)
-            except:
-                pass
-            
-            for img_path in temp_image_files:
+            # Clean up all temporary files
+            for file_path in temp_files_to_clean:
                 try:
-                    os.unlink(img_path)
+                    os.unlink(file_path)
                 except:
                     pass
+            
+            # Clean up image files
+            for image_path in image_paths if 'image_paths' in locals() else []:
+                try:
+                    os.unlink(image_path)
+                except:
+                    pass
+            
+            # Remove temp directory
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass
             
     except Exception as e:
         logger.error(f"PPTX to PDF conversion failed: {str(e)}")
         raise Exception(f"Conversion failed: {str(e)}")
 
 
-def _save_slide_as_image(presentation: Presentation, slide_idx: int) -> str:
+def _convert_pptx_to_images(pptx_path: str, output_dir: str) -> List[str]:
     """
-    Save a single slide as a temporary image file.
+    Convert PPTX slides to images using available methods.
     
     Args:
-        presentation: Presentation object
-        slide_idx: Index of slide to save
+        pptx_path: Path to PPTX file
+        output_dir: Directory to save images
         
     Returns:
-        Path to temporary image file
+        List of paths to generated image files
     """
-    # Create a temporary file for the image
-    temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
-    os.close(temp_fd)
+    image_paths = []
     
+    # Method 1: Try using LibreOffice (recommended for production)
+    if _try_libreoffice_conversion(pptx_path, output_dir):
+        # Find generated PNG files
+        for filename in sorted(os.listdir(output_dir)):
+            if filename.endswith('.png') and filename.startswith('input_'):
+                image_paths.append(os.path.join(output_dir, filename))
+    
+    # Method 2: If LibreOffice failed, use python-pptx with fallback
+    if not image_paths:
+        image_paths = _convert_with_python_pptx(pptx_path, output_dir)
+    
+    # Sort by slide number
+    image_paths.sort()
+    
+    logger.info(f"Converted {len(image_paths)} slides to images")
+    return image_paths
+
+
+def _try_libreoffice_conversion(pptx_path: str, output_dir: str) -> bool:
+    """
+    Try to convert PPTX to images using LibreOffice.
+    
+    Args:
+        pptx_path: Path to PPTX file
+        output_dir: Directory to save images
+        
+    Returns:
+        True if successful, False otherwise
+    """
     try:
-        # Export slide as image
-        slide = presentation.slides[slide_idx]
+        # Check if LibreOffice is available
+        result = subprocess.run(['which', 'libreoffice'], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("LibreOffice not found in PATH")
+            return False
         
-        # Note: In a real implementation, you would use python-pptx's 
-        # export functionality or an external tool. Since python-pptx
-        # doesn't have built-in image export, we'll create a simple
-        # placeholder for now.
+        # Convert PPTX to PNG using LibreOffice
+        cmd = [
+            'libreoffice',
+            '--headless',
+            '--convert-to', 'png',
+            '--outdir', output_dir,
+            pptx_path
+        ]
         
-        # For now, create a simple placeholder image with slide info
-        # In production, you would use: slide.shapes._spTree.save(temp_path)
-        # or an external tool like LibreOffice
+        logger.info(f"Running LibreOffice conversion: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         
-        # Create a simple placeholder image
-        width = int(presentation.slide_width.inches * 96)  # 96 DPI
-        height = int(presentation.slide_height.inches * 96)
+        if result.returncode == 0:
+            logger.info("LibreOffice conversion successful")
+            return True
+        else:
+            logger.warning(f"LibreOffice conversion failed: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.warning("LibreOffice conversion timed out")
+        return False
+    except Exception as e:
+        logger.warning(f"LibreOffice conversion error: {str(e)}")
+        return False
+
+
+def _convert_with_python_pptx(pptx_path: str, output_dir: str) -> List[str]:
+    """
+    Convert PPTX to images using python-pptx with a workaround.
+    
+    Args:
+        pptx_path: Path to PPTX file
+        output_dir: Directory to save images
         
-        # Create a colored image with slide number
+    Returns:
+        List of paths to generated image files
+    """
+    try:
+        from pptx import Presentation
+        from pptx.shapes.picture import Picture
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from io import BytesIO
+        
+        presentation = Presentation(pptx_path)
+        image_paths = []
+        
+        for slide_idx, slide in enumerate(presentation.slides):
+            # Create a simple image representation of the slide
+            # This is a fallback method - in production, use LibreOffice
+            
+            # Get slide dimensions
+            slide_width = presentation.slide_width.inches
+            slide_height = presentation.slide_height.inches
+            
+            # Convert to pixels (96 DPI)
+            width_px = int(slide_width * 96)
+            height_px = int(slide_height * 96)
+            
+            # Create image with slide content
+            image_path = os.path.join(output_dir, f"slide_{slide_idx + 1:03d}.png")
+            
+            # Try to extract and combine shapes
+            _create_slide_image(slide, width_px, height_px, image_path)
+            
+            image_paths.append(image_path)
+            
+        return image_paths
+        
+    except Exception as e:
+        logger.error(f"Python-pptx conversion failed: {str(e)}")
+        return []
+
+
+def _create_slide_image(slide, width_px: int, height_px: int, output_path: str):
+    """
+    Create an image representation of a slide.
+    
+    Args:
+        slide: PPTX slide object
+        width_px: Image width in pixels
+        height_px: Image height in pixels
+        output_path: Path to save the image
+    """
+    try:
         from PIL import Image, ImageDraw, ImageFont
-        img = Image.new('RGB', (width, height), color='white')
+        import textwrap
+        
+        # Create a white background
+        img = Image.new('RGB', (width_px, height_px), color='white')
         draw = ImageDraw.Draw(img)
         
-        # Add slide number text
+        # Try to load a font
         try:
-            font = ImageFont.truetype("arial.ttf", 40)
+            font_large = ImageFont.truetype("arial.ttf", 24)
+            font_medium = ImageFont.truetype("arial.ttf", 16)
+            font_small = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font_large = ImageFont.load_default()
+            font_medium = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        
+        # Draw slide title/header
+        title = f"Slide {len(image_paths) + 1}"
+        title_width = draw.textlength(title, font=font_large)
+        draw.text(
+            ((width_px - title_width) // 2, 50),
+            title,
+            fill='darkblue',
+            font=font_large
+        )
+        
+        # Extract and draw text from shapes
+        y_offset = 100
+        for shape in slide.shapes:
+            if hasattr(shape, "text") and shape.text.strip():
+                text = shape.text.strip()
+                
+                # Wrap text to fit width
+                max_width = width_px - 100
+                wrapped_lines = textwrap.wrap(text, width=40)
+                
+                for line in wrapped_lines:
+                    if y_offset < height_px - 50:
+                        line_width = draw.textlength(line, font=font_small)
+                        draw.text(
+                            ((width_px - line_width) // 2, y_offset),
+                            line,
+                            fill='black',
+                            font=font_small
+                        )
+                        y_offset += 20
+        
+        # Save the image
+        img.save(output_path, 'PNG', quality=95)
+        
+    except Exception as e:
+        logger.error(f"Failed to create slide image: {str(e)}")
+        # Create a simple fallback image
+        img = Image.new('RGB', (width_px, height_px), color='lightgray')
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 20)
         except:
             font = ImageFont.load_default()
         
-        text = f"Slide {slide_idx + 1}"
+        text = f"Slide {len(image_paths) + 1}"
         text_width = draw.textlength(text, font=font)
-        text_height = 40
-        
         draw.text(
-            ((width - text_width) // 2, (height - text_height) // 2),
+            ((width_px - text_width) // 2, height_px // 2 - 10),
             text,
-            fill='black',
+            fill='darkred',
             font=font
         )
         
-        # Save image
-        img.save(temp_path, 'PNG')
-        
-        return temp_path
-        
-    except Exception as e:
-        logger.error(f"Failed to save slide as image: {str(e)}")
-        # Return a blank image as fallback
-        img = Image.new('RGB', (800, 600), color='white')
-        img.save(temp_path, 'PNG')
-        return temp_path
+        img.save(output_path, 'PNG')
 
 
 def _extract_page_text_blocks(page: fitz.Page, ocr_langs: str) -> List[TextBlock]:
@@ -465,7 +615,7 @@ def estimate_pptx_processing_time(pptx_bytes: bytes) -> float:
         slide_count = info.get('slide_count', 1)
         
         # Base time per slide (seconds)
-        base_time_per_slide = 3.0
+        base_time_per_slide = 2.0
         
         estimated_time = slide_count * base_time_per_slide
         
