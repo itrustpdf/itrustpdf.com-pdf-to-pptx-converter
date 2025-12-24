@@ -1,9 +1,9 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 python-multipart==0.0.6
-python-pptx>=0.6.23      # Upgraded to a version without the Pillow<=9.5.0 constraint
+python-pptx==0.6.22
 PyMuPDF==1.23.8
-pillow==10.1.0           # Can now use the newer version
+pillow==9.5.0
 pytesseract==0.3.10
 reportlab==4.0.9
 pytest==7.4.3
