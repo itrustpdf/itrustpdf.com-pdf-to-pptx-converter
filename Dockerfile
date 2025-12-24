@@ -1,9 +1,15 @@
 FROM python:3.12-slim
 
-# Install system dependencies
+# Install system dependencies including LibreOffice
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
+    libreoffice \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    libreoffice-draw \
+    libreoffice-math \
     libgl1-mesa-dri \
     libglib2.0-0 \
     libsm6 \
@@ -24,6 +30,8 @@ RUN apt-get update && apt-get install -y \
     libfribidi-dev \
     libxcb1-dev \
     build-essential \
+    fonts-liberation \
+    fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -48,4 +56,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
 # Start the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--headless", "--convert-to", "png", "--outdir", "/tmp", "presentation.pptx"]
