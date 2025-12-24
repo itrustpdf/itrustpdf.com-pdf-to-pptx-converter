@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Install system dependencies including LibreOffice
+# Install system dependencies including LibreOffice, fonts, and poppler
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -27,6 +27,10 @@ RUN apt-get update && apt-get install -y \
     libreoffice \
     libreoffice-writer \
     libreoffice-impress \
+    fonts-dejavu \
+    fonts-dejavu-core \
+    fonts-dejavu-extra \
+    poppler-utils \  # For pdftoppm
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
