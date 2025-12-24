@@ -1,5 +1,5 @@
 """
-FastAPI web service for PDF to PPTX conversion.
+FastAPI web service for PDF to PPTX and PPTX to PDF conversion.
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -9,7 +9,16 @@ import io
 import logging
 from typing import Optional
 
-from .converter import pdf_to_pptx, validate_pdf, get_pdf_info, estimate_processing_time
+from .converter import (
+    pdf_to_pptx, 
+    pptx_to_pdf,
+    validate_pdf,
+    validate_pptx,
+    get_pdf_info,
+    get_pptx_info,
+    estimate_processing_time,
+    estimate_pptx_processing_time
+)
 from .ocr import test_tesseract_installation, get_tesseract_version
 
 # Configure logging
@@ -21,9 +30,9 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
-    title="PDF to PPTX Converter",
-    description="A web service that converts PDF documents to text-only PowerPoint presentations",
-    version="1.0.0",
+    title="PDF to PPTX and PPTX to PDF Converter",
+    description="A web service that converts PDF documents to PowerPoint presentations and vice versa",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -41,7 +50,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     """Initialize the service and check dependencies."""
-    logger.info("Starting PDF to PPTX Converter service")
+    logger.info("Starting PDF/PPTX Converter service")
     
     # Test Tesseract installation
     if test_tesseract_installation():
@@ -58,63 +67,196 @@ async def root():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>PDF to PPTX Converter</title>
+        <title>PDF ⇄ PPTX Converter</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            h1 { color: #333; }
-            .upload-form { background: #f9f9f9; padding: 20px; margin: 20px 0; border-radius: 8px; border: 2px solid #007acc; }
-            .form-group { margin: 15px 0; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
-            input[type="file"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-            input[type="checkbox"] { margin-right: 8px; }
-            .btn { background: #007acc; color: white; padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-            .btn:hover { background: #005a99; }
-            .endpoint { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-            .method { color: #fff; background: #007acc; padding: 5px 10px; border-radius: 3px; font-weight: bold; }
-            pre { background: #f0f0f0; padding: 10px; border-radius: 3px; overflow-x: auto; }
-            .info { background: #e7f3ff; padding: 15px; border-radius: 5px; border-left: 4px solid #007acc; }
-            .progress { display: none; margin: 15px 0; color: #007acc; }
+            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+            h1 { color: #333; text-align: center; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .upload-form { background: white; padding: 30px; margin: 20px 0; border-radius: 12px; border: 2px solid #007acc; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            .upload-form h2 { color: #007acc; margin-top: 0; display: flex; align-items: center; gap: 10px; }
+            .form-group { margin: 20px 0; }
+            label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; }
+            input[type="file"] { width: 100%; padding: 12px; border: 2px dashed #007acc; border-radius: 8px; background: #f9f9f9; cursor: pointer; }
+            input[type="checkbox"] { margin-right: 10px; transform: scale(1.2); }
+            .btn { background: linear-gradient(135deg, #007acc, #005a99); color: white; padding: 15px 30px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; width: 100%; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 10px; }
+            .btn:hover { background: linear-gradient(135deg, #005a99, #003d66); transform: translateY(-2px); box-shadow: 0 6px 12px rgba(0,0,0,0.15); }
+            .btn:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
+            .endpoint { background: white; padding: 20px; margin: 15px 0; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); border-left: 4px solid #007acc; }
+            .method { color: #fff; background: #007acc; padding: 5px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; }
+            pre { background: #f8f8f8; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 14px; border: 1px solid #eee; }
+            .info { background: #e7f3ff; padding: 20px; border-radius: 8px; border-left: 5px solid #007acc; margin: 20px 0; }
+            .progress { display: none; margin: 20px 0; padding: 15px; background: #f0f8ff; border-radius: 8px; border: 1px solid #007acc; color: #007acc; font-weight: bold; text-align: center; }
+            .converter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin: 30px 0; }
+            .converter-arrow { display: flex; align-items: center; justify-content: center; font-size: 40px; color: #007acc; }
+            @media (max-width: 768px) {
+                .converter-grid { grid-template-columns: 1fr; }
+                .converter-arrow { display: none; }
+            }
+            .tab-container { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            .tabs { display: flex; background: #f0f0f0; }
+            .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; font-weight: bold; color: #666; transition: all 0.3s; }
+            .tab.active { background: white; color: #007acc; border-bottom: 3px solid #007acc; }
+            .tab-content { display: none; padding: 30px; }
+            .tab-content.active { display: block; }
         </style>
     </head>
     <body>
-        <h1>PDF to PPTX Converter</h1>
-        
-        <div class="info">
-            <p><strong>Welcome to the PDF to PPTX Converter!</strong></p>
-            <p>This service converts PDF documents to text-only PowerPoint presentations with 1:1 page-to-slide mapping.</p>
-        </div>
-        
-        <div class="upload-form">
-            <h2>📄 Upload PDF File</h2>
-            <form id="uploadForm" enctype="multipart/form-data">
-                <div class="form-group">
-                    <label for="pdfFile">Select PDF File:</label>
-                    <input type="file" id="pdfFile" name="file" accept=".pdf" required>
+        <div class="container">
+            <h1>📄 PDF ⇄ PPTX Converter</h1>
+            
+            <div class="info">
+                <p><strong>Welcome to the PDF ⇄ PPTX Converter!</strong></p>
+                <p>Convert PDF documents to PowerPoint presentations and PowerPoint presentations back to PDF with 1:1 page/slide mapping.</p>
+            </div>
+            
+            <div class="tab-container">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('pdf-to-pptx')">📄 PDF to PPTX</div>
+                    <div class="tab" onclick="switchTab('pptx-to-pdf')">🔄 PPTX to PDF</div>
                 </div>
                 
-                <div class="form-group">
-                    <label for="ocrLanguages">OCR Languages (for scanned PDFs):</label>
-                    <input type="text" id="ocrLanguages" name="ocr_languages" value="eng" placeholder="eng, fra, deu, etc.">
+                <div id="pdf-to-pptx" class="tab-content active">
+                    <div class="upload-form">
+                        <h2>📄 → 📊 Convert PDF to PPTX</h2>
+                        <form id="pdfUploadForm" enctype="multipart/form-data">
+                            <div class="form-group">
+                                <label for="pdfFile">Select PDF File:</label>
+                                <input type="file" id="pdfFile" name="file" accept=".pdf" required>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="ocrLanguages">OCR Languages (for scanned PDFs):</label>
+                                <input type="text" id="ocrLanguages" name="ocr_languages" value="eng" placeholder="eng, fra, deu, etc.">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="dehyphenate" name="dehyphenate" checked>
+                                    Remove hyphenation from text
+                                </label>
+                            </div>
+                            
+                            <button type="submit" class="btn">
+                                <span>🔄 Convert PDF to PPTX</span>
+                            </button>
+                            <div class="progress" id="pdfProgress">Converting... Please wait.</div>
+                        </form>
+                    </div>
                 </div>
                 
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="dehyphenate" name="dehyphenate" checked>
-                        Remove hyphenation from text
-                    </label>
+                <div id="pptx-to-pdf" class="tab-content">
+                    <div class="upload-form">
+                        <h2>📊 → 📄 Convert PPTX to PDF</h2>
+                        <form id="pptxUploadForm" enctype="multipart/form-data">
+                            <div class="form-group">
+                                <label for="pptxFile">Select PPTX File:</label>
+                                <input type="file" id="pptxFile" name="file" accept=".pptx,.pptm,.ppt" required>
+                            </div>
+                            
+                            <button type="submit" class="btn">
+                                <span>🔄 Convert PPTX to PDF</span>
+                            </button>
+                            <div class="progress" id="pptxProgress">Converting... Please wait.</div>
+                        </form>
+                    </div>
                 </div>
-                
-                <button type="submit" class="btn">🔄 Convert to PPTX</button>
-                <div class="progress" id="progress">Converting... Please wait.</div>
-            </form>
+            </div>
+            
+            <h2>Available Endpoints</h2>
+            
+            <div class="endpoint">
+                <p><span class="method">POST</span> <strong>/convert</strong></p>
+                <p>Upload a PDF file and receive a PPTX file in response.</p>
+                <p><strong>Parameters:</strong></p>
+                <ul>
+                    <li><code>file</code> (required): PDF file to convert</li>
+                    <li><code>ocr_languages</code> (optional): OCR language codes (default: 'eng')</li>
+                    <li><code>dehyphenate</code> (optional): Remove hyphenation (default: true)</li>
+                </ul>
+            </div>
+            
+            <div class="endpoint">
+                <p><span class="method">POST</span> <strong>/convert-pptx</strong></p>
+                <p>Upload a PPTX file and receive a PDF file in response.</p>
+                <p><strong>Parameters:</strong></p>
+                <ul>
+                    <li><code>file</code> (required): PPTX file to convert</li>
+                </ul>
+            </div>
+            
+            <div class="endpoint">
+                <p><span class="method">POST</span> <strong>/info</strong></p>
+                <p>Get information about a PDF file without converting it.</p>
+            </div>
+            
+            <div class="endpoint">
+                <p><span class="method">POST</span> <strong>/info-pptx</strong></p>
+                <p>Get information about a PPTX file without converting it.</p>
+            </div>
+            
+            <div class="endpoint">
+                <p><span class="method">GET</span> <strong>/health</strong></p>
+                <p>Check service health and dependencies status.</p>
+            </div>
+            
+            <h2>Example Usage</h2>
+            <pre>
+# Convert PDF to PPTX
+curl -X POST "http://localhost:8000/convert" \\
+     -F "file=@document.pdf" \\
+     --output "presentation.pptx"
+
+# Convert PPTX to PDF
+curl -X POST "http://localhost:8000/convert-pptx" \\
+     -F "file=@presentation.pptx" \\
+     --output "document.pdf"
+
+# Get PDF information
+curl -X POST "http://localhost:8000/info" \\
+     -F "file=@document.pdf"
+
+# Get PPTX information
+curl -X POST "http://localhost:8000/info-pptx" \\
+     -F "file=@presentation.pptx"
+            </pre>
+            
+            <h2>Features</h2>
+            <ul>
+                <li>📄 → 📊 PDF to PPTX: Extracts text from native PDF content with OCR fallback</li>
+                <li>📊 → 📄 PPTX to PDF: Preserves text layout, formatting, and positioning 1:1</li>
+                <li>Preserves text positioning and layout in both directions</li>
+                <li>Automatic font sizing and slide/page dimension optimization</li>
+                <li>Support for multiple OCR languages for scanned PDFs</li>
+            </ul>
+            
+            <p><a href="/docs">View API Documentation</a> | <a href="/health">Check Health</a></p>
         </div>
         
         <script>
-        document.getElementById('uploadForm').onsubmit = async function(e) {
+        function switchTab(tabId) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            // Remove active class from all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab content
+            document.getElementById(tabId).classList.add('active');
+            
+            // Activate clicked tab
+            event.target.classList.add('active');
+        }
+        
+        // PDF to PPTX form handler
+        document.getElementById('pdfUploadForm').onsubmit = async function(e) {
             e.preventDefault();
             
             const fileInput = document.getElementById('pdfFile');
-            const progressDiv = document.getElementById('progress');
+            const progressDiv = document.getElementById('pdfProgress');
             const submitBtn = e.target.querySelector('button[type="submit"]');
             
             if (!fileInput.files[0]) {
@@ -128,8 +270,10 @@ async def root():
             formData.append('dehyphenate', document.getElementById('dehyphenate').checked);
             
             submitBtn.disabled = true;
-            submitBtn.textContent = 'Converting...';
+            submitBtn.innerHTML = '<span>Converting... Please wait</span>';
             progressDiv.style.display = 'block';
+            progressDiv.textContent = 'Converting PDF to PPTX... This may take a moment.';
+            progressDiv.style.color = '#007acc';
             
             try {
                 const response = await fetch('/convert', {
@@ -143,75 +287,84 @@ async def root():
                     const a = document.createElement('a');
                     a.style.display = 'none';
                     a.href = url;
-                    a.download = fileInput.files[0].name.replace('.pdf', '_converted.pptx');
+                    a.download = fileInput.files[0].name.replace(/\.pdf$/i, '_converted.pptx');
                     document.body.appendChild(a);
                     a.click();
                     window.URL.revokeObjectURL(url);
-                    progressDiv.textContent = 'Conversion completed! Download started.';
+                    progressDiv.textContent = '✓ Conversion completed! Download started.';
+                    progressDiv.style.color = '#28a745';
                 } else {
                     const error = await response.text();
                     throw new Error(`Conversion failed: ${error}`);
                 }
             } catch (error) {
-                progressDiv.textContent = `Error: ${error.message}`;
-                progressDiv.style.color = 'red';
+                progressDiv.textContent = `✗ Error: ${error.message}`;
+                progressDiv.style.color = '#dc3545';
             } finally {
                 submitBtn.disabled = false;
-                submitBtn.textContent = '🔄 Convert to PPTX';
+                submitBtn.innerHTML = '<span>🔄 Convert PDF to PPTX</span>';
                 setTimeout(() => {
                     progressDiv.style.display = 'none';
-                    progressDiv.style.color = '#007acc';
-                }, 3000);
+                }, 5000);
+            }
+        };
+        
+        // PPTX to PDF form handler
+        document.getElementById('pptxUploadForm').onsubmit = async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('pptxFile');
+            const progressDiv = document.getElementById('pptxProgress');
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+            
+            if (!fileInput.files[0]) {
+                alert('Please select a PPTX file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span>Converting... Please wait</span>';
+            progressDiv.style.display = 'block';
+            progressDiv.textContent = 'Converting PPTX to PDF... This may take a moment.';
+            progressDiv.style.color = '#007acc';
+            
+            try {
+                const response = await fetch('/convert-pptx', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = fileInput.files[0].name.replace(/\.pptx$/i, '_converted.pdf');
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    progressDiv.textContent = '✓ Conversion completed! Download started.';
+                    progressDiv.style.color = '#28a745';
+                } else {
+                    const error = await response.text();
+                    throw new Error(`Conversion failed: ${error}`);
+                }
+            } catch (error) {
+                progressDiv.textContent = `✗ Error: ${error.message}`;
+                progressDiv.style.color = '#dc3545';
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<span>🔄 Convert PPTX to PDF</span>';
+                setTimeout(() => {
+                    progressDiv.style.display = 'none';
+                }, 5000);
             }
         };
         </script>
-        
-        <h2>Available Endpoints</h2>
-        
-        <div class="endpoint">
-            <p><span class="method">POST</span> <strong>/convert</strong></p>
-            <p>Upload a PDF file and receive a PPTX file in response.</p>
-            <p><strong>Parameters:</strong></p>
-            <ul>
-                <li><code>file</code> (required): PDF file to convert</li>
-                <li><code>ocr_languages</code> (optional): OCR language codes (default: 'eng')</li>
-                <li><code>dehyphenate</code> (optional): Remove hyphenation (default: true)</li>
-            </ul>
-        </div>
-        
-        <div class="endpoint">
-            <p><span class="method">GET</span> <strong>/health</strong></p>
-            <p>Check service health and dependencies status.</p>
-        </div>
-        
-        <div class="endpoint">
-            <p><span class="method">POST</span> <strong>/info</strong></p>
-            <p>Get information about a PDF file without converting it.</p>
-        </div>
-        
-        <h2>Example Usage</h2>
-        <pre>
-# Convert PDF to PPTX
-curl -X POST "http://localhost:8000/convert" \\
-     -F "file=@document.pdf" \\
-     --output "presentation.pptx"
-
-# Get PDF information
-curl -X POST "http://localhost:8000/info" \\
-     -F "file=@document.pdf"
-        </pre>
-        
-        <h2>Features</h2>
-        <ul>
-            <li>Extracts text from native PDF content</li>
-            <li>Falls back to OCR for scanned documents</li>
-            <li>Preserves text positioning and layout</li>
-            <li>No images included in output</li>
-            <li>Optimized slide dimensions</li>
-            <li>Automatic font sizing</li>
-        </ul>
-        
-        <p><a href="/docs">View API Documentation</a> | <a href="/health">Check Health</a></p>
     </body>
     </html>
     """
@@ -247,7 +400,7 @@ async def convert_pdf_to_pptx(
     
     try:
         # Read file content
-        logger.info(f"Processing upload: {file.filename}")
+        logger.info(f"Processing PDF upload: {file.filename}")
         pdf_content = await file.read()
         
         if len(pdf_content) == 0:
@@ -280,9 +433,6 @@ async def convert_pdf_to_pptx(
         base_filename = file.filename.rsplit('.', 1)[0]
         output_filename = f"{base_filename}.pptx"
         
-        # Create streaming response
-        pptx_stream = io.BytesIO(pptx_content)
-        
         logger.info(f"Conversion completed: {output_filename} ({len(pptx_content)} bytes)")
         
         return StreamingResponse(
@@ -297,7 +447,83 @@ async def convert_pdf_to_pptx(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Conversion failed: {str(e)}")
+        logger.error(f"PDF to PPTX conversion failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Conversion failed: {str(e)}"
+        )
+
+
+@app.post("/convert-pptx")
+async def convert_pptx_to_pdf(
+    file: UploadFile = File(...)
+):
+    """
+    Convert a PPTX file to PDF format.
+    
+    Args:
+        file: PPTX file to convert
+        
+    Returns:
+        StreamingResponse with PDF file
+        
+    Raises:
+        HTTPException: If file validation or conversion fails
+    """
+    # Validate file type
+    valid_extensions = ['.pptx', '.pptm', '.ppt']
+    if not file.filename or not any(file.filename.lower().endswith(ext) for ext in valid_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a PPTX, PPTM, or PPT file"
+        )
+    
+    try:
+        # Read file content
+        logger.info(f"Processing PPTX upload: {file.filename}")
+        pptx_content = await file.read()
+        
+        if len(pptx_content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty file uploaded"
+            )
+        
+        # Validate PPTX
+        if not validate_pptx(pptx_content):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid PPTX file"
+            )
+        
+        # Log processing info
+        pptx_info = get_pptx_info(pptx_content)
+        estimated_time = estimate_pptx_processing_time(pptx_content)
+        logger.info(f"Converting {pptx_info.get('slide_count', 'unknown')} slides, "
+                   f"estimated time: {estimated_time:.1f}s")
+        
+        # Convert PPTX to PDF
+        pdf_content = pptx_to_pdf(pptx_content)
+        
+        # Generate response filename
+        base_filename = file.filename.rsplit('.', 1)[0]
+        output_filename = f"{base_filename}.pdf"
+        
+        logger.info(f"Conversion completed: {output_filename} ({len(pdf_content)} bytes)")
+        
+        return StreamingResponse(
+            io.BytesIO(pdf_content),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={output_filename}",
+                "Content-Length": str(len(pdf_content))
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PPTX to PDF conversion failed: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Conversion failed: {str(e)}"
@@ -362,6 +588,65 @@ async def get_pdf_information(file: UploadFile = File(...)):
         )
 
 
+@app.post("/info-pptx")
+async def get_pptx_information(file: UploadFile = File(...)):
+    """
+    Get information about a PPTX file without converting it.
+    
+    Args:
+        file: PPTX file to analyze
+        
+    Returns:
+        Dictionary with PPTX information
+        
+    Raises:
+        HTTPException: If file validation fails
+    """
+    # Validate file type
+    valid_extensions = ['.pptx', '.pptm', '.ppt']
+    if not file.filename or not any(file.filename.lower().endswith(ext) for ext in valid_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a PPTX, PPTM, or PPT file"
+        )
+    
+    try:
+        # Read file content
+        pptx_content = await file.read()
+        
+        if len(pptx_content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty file uploaded"
+            )
+        
+        # Validate PPTX
+        if not validate_pptx(pptx_content):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid PPTX file"
+            )
+        
+        # Get PPTX information
+        pptx_info = get_pptx_info(pptx_content)
+        
+        # Add processing estimates
+        pptx_info['estimated_processing_time_seconds'] = estimate_pptx_processing_time(pptx_content)
+        pptx_info['file_size_bytes'] = len(pptx_content)
+        pptx_info['filename'] = file.filename
+        
+        return pptx_info
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PPTX info extraction failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to analyze PPTX: {str(e)}"
+        )
+
+
 @app.get("/health")
 async def health_check():
     """
@@ -372,8 +657,8 @@ async def health_check():
     """
     health_status = {
         "status": "healthy",
-        "service": "PDF to PPTX Converter",
-        "version": "1.0.0",
+        "service": "PDF ⇄ PPTX Converter",
+        "version": "2.0.0",
         "dependencies": {
             "tesseract_ocr": test_tesseract_installation(),
             "tesseract_version": get_tesseract_version(),
