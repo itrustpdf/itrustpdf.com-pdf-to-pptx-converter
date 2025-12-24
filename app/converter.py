@@ -12,8 +12,8 @@ import subprocess
 import glob
 
 from pptx import Presentation
+from pptx.util import Inches
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 
@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 def pdf_to_pptx(pdf_bytes: bytes, 
                ocr_langs: str = 'eng', 
-               dehyphenate: bool = True) -> bytes:
+               dehyphenate: bool = True,
+               use_ocr: bool = True) -> bytes:
     """
     Convert PDF bytes to PPTX bytes.
     
@@ -37,6 +38,7 @@ def pdf_to_pptx(pdf_bytes: bytes,
         pdf_bytes: PDF file content as bytes
         ocr_langs: Tesseract language codes for OCR
         dehyphenate: Whether to remove end-of-line hyphenation
+        use_ocr: If True, extract text with OCR. If False, convert pages to images.
         
     Returns:
         PPTX file content as bytes
@@ -45,8 +47,28 @@ def pdf_to_pptx(pdf_bytes: bytes,
         ValueError: If PDF processing fails
         Exception: If conversion fails
     """
+    if use_ocr:
+        return _pdf_to_pptx_with_ocr(pdf_bytes, ocr_langs, dehyphenate)
+    else:
+        return _pdf_to_pptx_as_images(pdf_bytes)
+
+
+def _pdf_to_pptx_with_ocr(pdf_bytes: bytes, 
+                         ocr_langs: str = 'eng', 
+                         dehyphenate: bool = True) -> bytes:
+    """
+    Convert PDF to PPTX using OCR to extract and preserve text formatting.
+    
+    Args:
+        pdf_bytes: PDF file content as bytes
+        ocr_langs: Tesseract language codes for OCR
+        dehyphenate: Whether to remove end-of-line hyphenation
+        
+    Returns:
+        PPTX file content as bytes
+    """
     try:
-        logger.info("Starting PDF to PPTX conversion")
+        logger.info("Starting PDF to PPTX conversion with OCR")
         
         # Open PDF document
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -91,12 +113,198 @@ def pdf_to_pptx(pdf_bytes: bytes,
         # Generate PPTX
         pptx_bytes = create_pptx_from_blocks(all_page_blocks, slide_config)
         
-        logger.info(f"Conversion completed: {len(pptx_bytes)} bytes")
+        logger.info(f"OCR conversion completed: {len(pptx_bytes)} bytes")
         return pptx_bytes
         
     except Exception as e:
-        logger.error(f"PDF to PPTX conversion failed: {str(e)}")
-        raise Exception(f"Conversion failed: {str(e)}")
+        logger.error(f"PDF to PPTX with OCR failed: {str(e)}")
+        raise Exception(f"OCR conversion failed: {str(e)}")
+
+
+def _pdf_to_pptx_as_images(pdf_bytes: bytes) -> bytes:
+    """
+    Convert PDF to PPTX by placing each page as an image on a slide.
+    
+    Args:
+        pdf_bytes: PDF file content as bytes
+        
+    Returns:
+        PPTX file content as bytes
+    """
+    try:
+        logger.info("Starting PDF to PPTX conversion as images")
+        
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            # Save PDF to temporary file
+            pdf_path = os.path.join(temp_dir, "input.pdf")
+            with open(pdf_path, 'wb') as f:
+                f.write(pdf_bytes)
+            
+            # Convert PDF pages to images
+            image_paths = _convert_pdf_to_images(pdf_path, temp_dir)
+            
+            if not image_paths:
+                raise ValueError("Failed to convert PDF pages to images")
+            
+            logger.info(f"Converted {len(image_paths)} pages to images")
+            
+            # Create a new presentation
+            from pptx import Presentation
+            from pptx.util import Inches
+            
+            presentation = Presentation()
+            
+            # Get slide dimensions from first image
+            with Image.open(image_paths[0]) as img:
+                img_width, img_height = img.size
+            
+            # Calculate aspect ratio
+            aspect_ratio = img_width / img_height
+            
+            # Set slide size based on image aspect ratio
+            # Standard slide size is 10x7.5 inches (4:3) or 13.33x7.5 inches (16:9)
+            if aspect_ratio > 1.5:  # Wider than 3:2, use 16:9
+                slide_width = Inches(13.33)
+                slide_height = Inches(7.5)
+            else:  # Use 4:3
+                slide_width = Inches(10)
+                slide_height = Inches(7.5)
+            
+            presentation.slide_width = slide_width
+            presentation.slide_height = slide_height
+            
+            # Add each image as a slide
+            for i, image_path in enumerate(sorted(image_paths)):
+                logger.info(f"Adding page {i + 1}/{len(image_paths)} as slide")
+                
+                # Add a blank slide
+                slide_layout = presentation.slide_layouts[6]  # Blank layout
+                slide = presentation.slides.add_slide(slide_layout)
+                
+                # Add image to slide
+                left = Inches(0.5)
+                top = Inches(0.5)
+                width = slide_width - Inches(1)  # 1 inch margins
+                height = slide_height - Inches(1)
+                
+                pic = slide.shapes.add_picture(image_path, left, top, width, height)
+            
+            # Save presentation to bytes
+            pptx_buffer = io.BytesIO()
+            presentation.save(pptx_buffer)
+            pptx_bytes = pptx_buffer.getvalue()
+            
+            logger.info(f"Image conversion completed: {len(pptx_bytes)} bytes")
+            return pptx_bytes
+            
+        finally:
+            # Clean up
+            import shutil
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+            
+    except Exception as e:
+        logger.error(f"PDF to PPTX as images failed: {str(e)}")
+        raise Exception(f"Image conversion failed: {str(e)}")
+
+
+def _convert_pdf_to_images(pdf_path: str, output_dir: str) -> List[str]:
+    """
+    Convert PDF pages to images using PyMuPDF.
+    
+    Args:
+        pdf_path: Path to PDF file
+        output_dir: Directory to save images
+        
+    Returns:
+        List of paths to generated image files
+    """
+    try:
+        image_paths = []
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Get page dimensions
+            rect = page.rect
+            zoom = 2.0  # Zoom factor for better quality
+            mat = fitz.Matrix(zoom, zoom)
+            
+            # Render page to image
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            
+            # Save image
+            image_path = os.path.join(output_dir, f"page_{page_num + 1:03d}.png")
+            pix.save(image_path)
+            
+            image_paths.append(image_path)
+            logger.info(f"Saved page {page_num + 1} as image: {image_path}")
+        
+        doc.close()
+        return image_paths
+        
+    except Exception as e:
+        logger.error(f"Failed to convert PDF to images: {str(e)}")
+        
+        # Try alternative method using pdftoppm if available
+        try:
+            return _convert_pdf_to_images_pdftoppm(pdf_path, output_dir)
+        except Exception as e2:
+            logger.error(f"pdftoppm also failed: {str(e2)}")
+            return []
+
+
+def _convert_pdf_to_images_pdftoppm(pdf_path: str, output_dir: str) -> List[str]:
+    """
+    Convert PDF pages to images using pdftoppm (fallback).
+    
+    Args:
+        pdf_path: Path to PDF file
+        output_dir: Directory to save images
+        
+    Returns:
+        List of paths to generated image files
+    """
+    try:
+        # Check if pdftoppm is available
+        result = subprocess.run(['which', 'pdftoppm'], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("pdftoppm not found in PATH")
+            return []
+        
+        # Convert PDF to PNG using pdftoppm
+        output_pattern = os.path.join(output_dir, "page")
+        cmd = [
+            'pdftoppm',
+            '-png',
+            '-r', '150',  # 150 DPI for good quality
+            pdf_path,
+            output_pattern
+        ]
+        
+        logger.info(f"Running pdftoppm: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        if result.returncode == 0:
+            # Find generated PNG files
+            image_paths = glob.glob(os.path.join(output_dir, "page*.png"))
+            image_paths.sort()
+            logger.info(f"pdftoppm converted {len(image_paths)} pages")
+            return image_paths
+        else:
+            logger.warning(f"pdftoppm failed: {result.stderr}")
+            return []
+            
+    except Exception as e:
+        logger.warning(f"pdftoppm conversion error: {str(e)}")
+        return []
 
 
 def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
@@ -567,12 +775,13 @@ def get_pptx_info(pptx_bytes: bytes) -> dict:
         return {'error': str(e)}
 
 
-def estimate_processing_time(pdf_bytes: bytes) -> float:
+def estimate_processing_time(pdf_bytes: bytes, use_ocr: bool = True) -> float:
     """
     Estimate processing time for a PDF based on page count and content complexity.
     
     Args:
         pdf_bytes: PDF file content as bytes
+        use_ocr: Whether OCR will be used
         
     Returns:
         Estimated processing time in seconds
@@ -582,16 +791,17 @@ def estimate_processing_time(pdf_bytes: bytes) -> float:
         page_count = len(doc)
         doc.close()
         
-        # Base time per page (seconds)
-        base_time_per_page = 2.0
+        if use_ocr:
+            # OCR mode
+            base_time_per_page = 2.0
+            ocr_time_per_page = 5.0
+            # Assume 50% of pages might need OCR
+            estimated_time = (page_count * base_time_per_page) + (page_count * 0.5 * ocr_time_per_page)
+        else:
+            # Image mode (faster)
+            estimated_time = page_count * 1.0
         
-        # Additional time for OCR-heavy documents
-        ocr_time_per_page = 5.0
-        
-        # Assume 50% of pages might need OCR (conservative estimate)
-        estimated_time = (page_count * base_time_per_page) + (page_count * 0.5 * ocr_time_per_page)
-        
-        return max(5.0, estimated_time)  # Minimum 5 seconds
+        return max(3.0, estimated_time)  # Minimum 3 seconds
         
     except Exception as e:
         logger.error(f"Failed to estimate processing time: {str(e)}")
