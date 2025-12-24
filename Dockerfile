@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y \
     fonts-dejavu \
     fonts-dejavu-core \
     fonts-dejavu-extra \
-    poppler-utils \  # For pdftoppm
-    && rm -rf /var/lib/apt/lists/*
+    poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
