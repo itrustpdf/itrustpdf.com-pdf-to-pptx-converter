@@ -3,17 +3,17 @@ Main PDF to PPTX and PPTX to PDF conversion pipeline.
 """
 
 import fitz  # PyMuPDF
-from typing import List
+from typing import List, Optional, Tuple
 import logging
 import io
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import tempfile
 import os
-from pathlib import Path
-
-from pptx import Presentation
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
-from PIL import Image, ImageDraw, ImageFont
 
 from .models import TextBlock, MINIMUM_TEXT_THRESHOLD
 from .utils import get_pdf_dimensions
@@ -99,7 +99,7 @@ def pdf_to_pptx(pdf_bytes: bytes,
 
 def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
     """
-    Convert PPTX bytes to PDF bytes - simple 1:1 image-based conversion.
+    Convert PPTX bytes to PDF bytes with 1:1 layout preservation.
     
     Args:
         pptx_bytes: PPTX file content as bytes
@@ -111,187 +111,157 @@ def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
         ValueError: If PPTX processing fails
         Exception: If conversion fails
     """
-    temp_dir = None
-    
     try:
         logger.info("Starting PPTX to PDF conversion")
         
-        # Create temporary directory
-        temp_dir = tempfile.mkdtemp(prefix="pptx_to_pdf_")
+        # Create a temporary file for the PPTX
+        with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_pptx:
+            tmp_pptx.write(pptx_bytes)
+            tmp_pptx_path = tmp_pptx.name
         
-        # Save PPTX to temporary file
-        pptx_path = os.path.join(temp_dir, "presentation.pptx")
-        with open(pptx_path, "wb") as f:
-            f.write(pptx_bytes)
-        
-        # Load presentation
-        presentation = Presentation(pptx_path)
-        slide_count = len(presentation.slides)
-        
-        if slide_count == 0:
-            raise ValueError("Empty PPTX file")
-        
-        logger.info(f"Processing PPTX: {slide_count} slides")
-        
-        # Get slide dimensions (convert inches to points: 1 inch = 72 points)
-        slide_width_inches = presentation.slide_width.inches
-        slide_height_inches = presentation.slide_height.inches
-        pdf_width = slide_width_inches * 72
-        pdf_height = slide_height_inches * 72
-        
-        # Standard page sizes for comparison
-        standard_sizes = {
-            "letter": letter,
-            "A4": A4
-        }
-        
-        # Use standard page size if close to it
-        page_size = (pdf_width, pdf_height)
-        for name, size in standard_sizes.items():
-            if abs(pdf_width - size[0]) < 10 and abs(pdf_height - size[1]) < 10:
-                page_size = size
-                logger.info(f"Using standard {name} page size")
-                break
-        
-        # Create PDF buffer
-        pdf_buffer = io.BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=page_size)
-        
-        # Process each slide
-        for slide_idx in range(slide_count):
-            logger.info(f"Processing slide {slide_idx + 1}/{slide_count}")
+        try:
+            # Load the presentation
+            presentation = Presentation(tmp_pptx_path)
+            slide_count = len(presentation.slides)
             
-            if slide_idx > 0:
-                c.showPage()
+            logger.info(f"Processing PPTX: {slide_count} slides")
             
-            # Create image for this slide
-            image_path = os.path.join(temp_dir, f"slide_{slide_idx}.png")
-            _create_slide_image(presentation, slide_idx, image_path, 
-                              int(page_size[0]), int(page_size[1]))
+            # Get slide dimensions (PPTX uses inches, convert to points for PDF)
+            slide_width = presentation.slide_width.inches
+            slide_height = presentation.slide_height.inches
             
-            # Add image to PDF
-            try:
-                c.drawImage(image_path, 0, 0, page_size[0], page_size[1])
-            except Exception as img_error:
-                logger.warning(f"Failed to add image: {img_error}")
-                # Draw placeholder
-                c.setFillColorRGB(0.95, 0.95, 0.95)
-                c.rect(0, 0, page_size[0], page_size[1], fill=1)
-                c.setFillColorRGB(0, 0, 0)
-                c.setFont("Helvetica-Bold", 24)
-                c.drawCentredString(page_size[0]/2, page_size[1]/2, f"Slide {slide_idx + 1}")
-                c.setFont("Helvetica", 12)
-                c.drawCentredString(page_size[0]/2, page_size[1]/2 - 40, 
-                                  f"{slide_width_inches:.1f} x {slide_height_inches:.1f} inches")
-        
-        # Save PDF
-        c.save()
-        pdf_bytes = pdf_buffer.getvalue()
-        
-        logger.info(f"Conversion completed: {len(pdf_bytes)} bytes")
-        return pdf_bytes
-        
+            # Create PDF in memory
+            pdf_buffer = io.BytesIO()
+            
+            # Convert inches to points (1 inch = 72 points)
+            pdf_width = slide_width * 72
+            pdf_height = slide_height * 72
+            
+            # Create PDF canvas with custom page size
+            c = canvas.Canvas(pdf_buffer, pagesize=(pdf_width, pdf_height))
+            
+            # Process each slide
+            for slide_idx, slide in enumerate(presentation.slides):
+                logger.info(f"Processing slide {slide_idx + 1}/{slide_count}")
+                
+                # Create a new page for each slide
+                if slide_idx > 0:
+                    c.showPage()
+                
+                # Extract and draw all shapes from the slide
+                _draw_slide_shapes(c, slide, pdf_width, pdf_height)
+            
+            # Save the PDF
+            c.save()
+            
+            # Get PDF bytes
+            pdf_bytes = pdf_buffer.getvalue()
+            
+            logger.info(f"Conversion completed: {len(pdf_bytes)} bytes")
+            return pdf_bytes
+            
+        finally:
+            # Clean up temporary file
+            os.unlink(tmp_pptx_path)
+            
     except Exception as e:
         logger.error(f"PPTX to PDF conversion failed: {str(e)}")
         raise Exception(f"Conversion failed: {str(e)}")
-        
-    finally:
-        # Clean up
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                import shutil
-                shutil.rmtree(temp_dir)
-            except:
-                pass
 
 
-def _create_slide_image(presentation: Presentation, slide_idx: int, 
-                       output_path: str, width: int, height: int):
+def _draw_slide_shapes(canvas_obj, slide, pdf_width: float, pdf_height: float):
     """
-    Create a simple image for a slide.
+    Draw all text shapes from a slide onto the PDF canvas.
     
     Args:
-        presentation: Presentation object
-        slide_idx: Slide index
-        output_path: Path to save image
-        width: Image width
-        height: Image height
+        canvas_obj: ReportLab canvas object
+        slide: pptx slide object
+        pdf_width: PDF page width in points
+        pdf_height: PDF page height in points
     """
-    try:
-        # Create image with slide info
-        img = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(img)
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+            
+        # Get shape position and size (PPTX uses EMUs, convert to points)
+        # 1 inch = 914400 EMUs, 1 inch = 72 points
+        left_emu = shape.left
+        top_emu = shape.top
+        width_emu = shape.width
+        height_emu = shape.height
         
-        # Try to use a nice font
-        font = None
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        ]
+        # Convert EMUs to inches, then to points
+        left_in = left_emu / 914400
+        top_in = top_emu / 914400
+        width_in = width_emu / 914400
+        height_in = height_emu / 914400
         
-        for fp in font_paths:
-            if os.path.exists(fp):
-                try:
-                    font = ImageFont.truetype(fp, 48)
-                    break
-                except:
-                    continue
+        left_pt = left_in * 72
+        top_pt = top_in * 72
+        width_pt = width_in * 72
+        height_pt = height_in * 72
         
-        if font is None:
-            font = ImageFont.load_default()
+        # PPTX origin is top-left, PDF origin is bottom-left
+        # Convert Y coordinate
+        pdf_y = pdf_height - top_pt - height_pt
         
-        # Get slide
-        slide = presentation.slides[slide_idx]
+        # Process text frame
+        text_frame = shape.text_frame
         
-        # Draw slide number
-        text = f"Slide {slide_idx + 1}"
+        # Get text alignment
+        alignment = 'left'
+        if hasattr(text_frame.paragraphs[0], 'alignment'):
+            align_val = text_frame.paragraphs[0].alignment
+            if align_val:
+                if align_val.name == 'CENTER':
+                    alignment = 'center'
+                elif align_val.name == 'RIGHT':
+                    alignment = 'right'
+                elif align_val.name == 'JUSTIFY':
+                    alignment = 'justify'
         
-        # Calculate text position
-        try:
-            # Try to get text bounding box
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-        except:
-            # Fallback calculation
-            text_width = len(text) * 30
-            text_height = 48
+        # Get font properties from the first paragraph/run
+        if text_frame.paragraphs and text_frame.paragraphs[0].runs:
+            first_run = text_frame.paragraphs[0].runs[0]
+            font_name = first_run.font.name or 'Helvetica'
+            font_size = first_run.font.size.pt if first_run.font.size else 12
+            is_bold = first_run.font.bold
+            is_italic = first_run.font.italic
+        else:
+            font_name = 'Helvetica'
+            font_size = 12
+            is_bold = False
+            is_italic = False
         
-        x = (width - text_width) // 2
-        y = (height - text_height) // 2
+        # Set font on canvas
+        font_style = ''
+        if is_bold and is_italic:
+            font_style = 'bolditalic'
+        elif is_bold:
+            font_style = 'bold'
+        elif is_italic:
+            font_style = 'italic'
         
-        # Draw text with shadow for better visibility
-        shadow_offset = 3
-        draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill='#888888')
-        draw.text((x, y), text, font=font, fill='#000000')
+        canvas_obj.setFont(font_name, font_size)
         
-        # Add slide dimensions
-        dim_text = f"{presentation.slide_width.inches:.1f} × {presentation.slide_height.inches:.1f} inches"
-        try:
-            small_font = ImageFont.truetype(font_paths[0], 20) if os.path.exists(font_paths[0]) else ImageFont.load_default()
-            dim_bbox = draw.textbbox((0, 0), dim_text, font=small_font)
-            dim_width = dim_bbox[2] - dim_bbox[0]
-            dim_x = (width - dim_width) // 2
-            dim_y = y + text_height + 30
-            draw.text((dim_x, dim_y), dim_text, font=small_font, fill='#666666')
-        except:
-            pass
+        # Extract text content
+        text_content = []
+        for paragraph in text_frame.paragraphs:
+            para_text = ''
+            for run in paragraph.runs:
+                para_text += run.text
+            if para_text.strip():
+                text_content.append(para_text)
         
-        # Add border
-        border_color = '#007acc'
-        border_width = 4
-        draw.rectangle([border_width, border_width, width-border_width, height-border_width], 
-                      outline=border_color, width=border_width)
+        full_text = '\n'.join(text_content)
         
-        # Save image
-        img.save(output_path, 'PNG', quality=95)
-        
-    except Exception as e:
-        logger.error(f"Failed to create slide image: {str(e)}")
-        # Create minimal fallback image
-        img = Image.new('RGB', (width, height), color='#f0f0f0')
-        img.save(output_path, 'PNG')
+        if full_text.strip():
+            # Draw text box
+            canvas_obj.drawString(
+                left_pt,
+                pdf_y + height_pt - font_size,  # Adjust for baseline
+                full_text
+            )
 
 
 def _extract_page_text_blocks(page: fitz.Page, ocr_langs: str) -> List[TextBlock]:
@@ -370,15 +340,14 @@ def validate_pptx(pptx_bytes: bytes) -> bool:
             presentation = Presentation(tmp_path)
             # Check if we can access basic properties
             _ = len(presentation.slides)
+            _ = presentation.slide_width
+            _ = presentation.slide_height
             return True
         except Exception as e:
             logger.error(f"PPTX validation failed: {str(e)}")
             return False
         finally:
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+            os.unlink(tmp_path)
             
     except Exception as e:
         logger.error(f"PPTX file handling failed: {str(e)}")
@@ -451,13 +420,18 @@ def get_pptx_info(pptx_bytes: bytes) -> dict:
                 'slide_aspect_ratio': presentation.slide_width.inches / presentation.slide_height.inches,
             }
             
+            # Count shapes per slide
+            shapes_by_slide = []
+            for slide in presentation.slides:
+                shapes_by_slide.append(len(slide.shapes))
+            
+            info['shapes_by_slide'] = shapes_by_slide
+            info['total_shapes'] = sum(shapes_by_slide)
+            
             return info
             
         finally:
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+            os.unlink(tmp_path)
             
     except Exception as e:
         logger.error(f"Failed to get PPTX info: {str(e)}")
@@ -497,7 +471,7 @@ def estimate_processing_time(pdf_bytes: bytes) -> float:
 
 def estimate_pptx_processing_time(pptx_bytes: bytes) -> float:
     """
-    Estimate processing time for a PPTX based on slide count.
+    Estimate processing time for a PPTX based on slide count and content complexity.
     
     Args:
         pptx_bytes: PPTX file content as bytes
@@ -510,9 +484,13 @@ def estimate_pptx_processing_time(pptx_bytes: bytes) -> float:
         slide_count = info.get('slide_count', 1)
         
         # Base time per slide (seconds)
-        base_time_per_slide = 1.5
+        base_time_per_slide = 1.0
         
-        estimated_time = slide_count * base_time_per_slide
+        # Additional time for complex slides with many shapes
+        shapes_per_slide = info.get('total_shapes', 0) / max(slide_count, 1)
+        complexity_factor = min(5.0, shapes_per_slide / 10)  # Cap at 5x
+        
+        estimated_time = slide_count * base_time_per_slide * (1 + complexity_factor)
         
         return max(3.0, estimated_time)  # Minimum 3 seconds
         
