@@ -4,6 +4,9 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-fra \
+    tesseract-ocr-deu \
+    tesseract-ocr-spa \
     libreoffice \
     libreoffice-writer \
     libreoffice-calc \
@@ -18,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     ghostscript \
     curl \
+    wget \
     zlib1g-dev \
     libjpeg-dev \
     libfreetype6-dev \
@@ -32,6 +36,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     fonts-liberation \
     fonts-dejavu \
+    fonts-freefont-ttf \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -53,7 +58,7 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/ || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # Start the application
-CMD ["uvicorn", "app.main:app", "--headless", "--convert-to", "png", "--outdir", "/tmp", "presentation.pptx"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
